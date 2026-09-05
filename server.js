@@ -14,6 +14,31 @@ app.use(express.json());
 let cache = { expiresAt: 0, data: null };
 let userCache = { id: null, username: null, expiresAt: 0 };
 
+function getXConfig() {
+  return {
+    bearerToken: process.env.X_BEARER_TOKEN || '',
+    apiKey: process.env.X_API_KEY || '',
+    apiSecret: process.env.X_API_SECRET || '',
+    clientId: process.env.X_CLIENT_ID || '',
+    clientSecret: process.env.X_CLIENT_SECRET || '',
+    accessToken: process.env.X_ACCESS_TOKEN || '',
+    accessTokenSecret: process.env.X_ACCESS_TOKEN_SECRET || ''
+  };
+}
+
+function getCredentialStatus() {
+  const config = getXConfig();
+  return {
+    bearer_token: Boolean(config.bearerToken),
+    api_key: Boolean(config.apiKey),
+    api_secret: Boolean(config.apiSecret),
+    client_id: Boolean(config.clientId),
+    client_secret: Boolean(config.clientSecret),
+    access_token: Boolean(config.accessToken),
+    access_token_secret: Boolean(config.accessTokenSecret)
+  };
+}
+
 function requireBearer() {
   if (!process.env.X_BEARER_TOKEN) {
     const error = new Error('X_BEARER_TOKEN is not configured on the server.');
@@ -22,13 +47,16 @@ function requireBearer() {
   }
 }
 
-async function xFetch(path) {
+async function xFetch(path, options = {}) {
   requireBearer();
   const response = await fetch(`${X_API_BASE}${path}`, {
+    method: options.method || 'GET',
     headers: {
       Authorization: `Bearer ${process.env.X_BEARER_TOKEN}`,
-      Accept: 'application/json'
-    }
+      Accept: 'application/json',
+      ...(options.headers || {})
+    },
+    body: options.body
   });
 
   const body = await response.json().catch(() => ({}));
@@ -117,7 +145,11 @@ app.get('/', (_req, res) => {
   res.json({
     name: 'Fabrizio Romano Backend',
     status: 'ok',
-    endpoints: ['/health', '/api/x-posts']
+    authentication: {
+      supported: ['Bearer Token', 'API Key/Secret', 'OAuth 2.0 Client ID/Secret', 'OAuth 1.0a Access Token/Secret'],
+      current_read_method: 'Bearer Token'
+    },
+    endpoints: ['/health', '/api/x-config', '/api/x-posts']
   });
 });
 
@@ -126,7 +158,17 @@ app.get('/health', (_req, res) => {
     ok: true,
     x_configured: Boolean(process.env.X_BEARER_TOKEN),
     x_username: X_USERNAME,
+    authentication: getCredentialStatus(),
     timestamp: new Date().toISOString()
+  });
+});
+
+// Safe diagnostics: reports only whether credentials exist, never their values.
+app.get('/api/x-config', (_req, res) => {
+  res.json({
+    username: X_USERNAME,
+    credentials: getCredentialStatus(),
+    current_read_auth: 'bearer_token'
   });
 });
 
