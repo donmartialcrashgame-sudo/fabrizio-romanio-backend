@@ -3,6 +3,7 @@ import cors from 'cors';
 import 'dotenv/config';
 import { registerWatchmodeRoutes, watchmodeConfigured } from './watchmode.js';
 import { registerTmdbRoutes, tmdbConfigured } from './tmdb.js';
+import { registerTmdbListRoutes } from './tmdb-lists.js';
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -15,7 +16,7 @@ const cache = { expiresAt: 0, data: null };
 const userCache = { id: null, username: null, expiresAt: 0 };
 const youtubeCache = new Map();
 
-app.use(cors());
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 
 function getCredentialStatus() {
@@ -23,7 +24,7 @@ function getCredentialStatus() {
     bearer_token: Boolean(process.env.X_BEARER_TOKEN), api_key: Boolean(process.env.X_API_KEY), api_secret: Boolean(process.env.X_API_SECRET),
     client_id: Boolean(process.env.X_CLIENT_ID), client_secret: Boolean(process.env.X_CLIENT_SECRET), access_token: Boolean(process.env.X_ACCESS_TOKEN),
     access_token_secret: Boolean(process.env.X_ACCESS_TOKEN_SECRET), youtube_api_key: Boolean(process.env.YOUTUBE_API_KEY),
-    watchmode_api_key: watchmodeConfigured(), tmdb_api_key: tmdbConfigured()
+    watchmode_api_key: watchmodeConfigured(), tmdb_api_key: tmdbConfigured(), tmdb_read_access_token: Boolean(process.env.TMDB_API_READ_ACCESS_TOKEN)
   };
 }
 
@@ -35,8 +36,8 @@ async function fetchRecentPosts(limit=10){const user=await getUser();const safeL
 function normalizeYouTubeVideos(payload){return(payload.items||[]).map(item=>{const id=item.id?.videoId||item.id,s=item.snippet||{},st=item.statistics||{};return{id,title:s.title||'',description:s.description||'',published_at:s.publishedAt||null,channel_id:s.channelId||null,channel_title:s.channelTitle||'',thumbnails:s.thumbnails||{},url:id?`https://www.youtube.com/watch?v=${id}`:null,statistics:item.statistics?{view_count:st.viewCount||'0',like_count:st.likeCount||'0',comment_count:st.commentCount||'0'}:null}})}
 async function fetchYouTubeVideos(query='Fabrizio Romano',limit=10){const safeLimit=Math.min(Math.max(Number(limit)||10,1),50),safeQuery=String(query||'Fabrizio Romano').trim()||'Fabrizio Romano',key=`${safeQuery.toLowerCase()}::${safeLimit}`,cached=youtubeCache.get(key);if(cached&&cached.expiresAt>Date.now())return{...cached.data,cached:true};const search=await youtubeFetch('/search',{part:'snippet',q:safeQuery,type:'video',order:'date',maxResults:safeLimit});const ids=(search.items||[]).map(i=>i.id?.videoId).filter(Boolean);let videos=normalizeYouTubeVideos(search);if(ids.length){const details=await youtubeFetch('/videos',{part:'snippet,statistics',id:ids.join(',')});const byId=new Map(normalizeYouTubeVideos(details).map(v=>[v.id,v]));videos=videos.map(v=>byId.get(v.id)||v)}const data={videos,query:safeQuery,count:videos.length,source:'YouTube Data API v3',fetched_at:new Date().toISOString()};youtubeCache.set(key,{data,expiresAt:Date.now()+YOUTUBE_CACHE_MS});return{...data,cached:false}}
 
-app.get('/',(_req,res)=>res.json({name:'Fabrizio Romano Backend',status:'ok',authentication:{supported:['Bearer Token','API Key/Secret','OAuth 2.0 Client ID/Secret','OAuth 1.0a Access Token/Secret'],current_x_read_method:'Bearer Token',youtube_read_method:'API Key',watchmode_read_method:'X-API-Key header',tmdb_read_method:'Bearer token or API key'},endpoints:['/health','/api/x-config','/api/x-test','/api/x-posts','/api/youtube-test','/api/youtube-videos','/api/watchmode-test','/api/movies','/api/movies/:id','/api/movies/:id/sources','/api/movie-genres','/api/movie-providers','/api/tmdb-test','/api/tmdb-movies','/api/tmdb-awards','/api/tmdb-movies/:id','/api/tmdb-movies/:id/providers']}));
-app.get('/health',(_req,res)=>res.json({ok:true,x_configured:Boolean(process.env.X_BEARER_TOKEN),youtube_configured:Boolean(process.env.YOUTUBE_API_KEY),watchmode_configured:watchmodeConfigured(),tmdb_configured:tmdbConfigured(),x_username:X_USERNAME,authentication:getCredentialStatus(),timestamp:new Date().toISOString()}));
+app.get('/',(_req,res)=>res.json({name:'Fabrizio Romano Backend',status:'ok',authentication:{supported:['Bearer Token','API Key/Secret','OAuth 2.0 Client ID/Secret','OAuth 1.0a Access Token/Secret'],current_x_read_method:'Bearer Token',youtube_read_method:'API Key',watchmode_read_method:'X-API-Key header',tmdb_read_method:'Bearer token or API key',tmdb_user_lists:'TMDB v4 user access token'},endpoints:['/health','/api/x-config','/api/x-test','/api/x-posts','/api/youtube-test','/api/youtube-videos','/api/watchmode-test','/api/movies','/api/movies/:id','/api/movies/:id/sources','/api/movie-genres','/api/movie-providers','/api/tmdb-test','/api/tmdb-movies','/api/tmdb-awards','/api/tmdb-movies/:id','/api/tmdb-movies/:id/providers','/api/tmdb-auth/start','/api/tmdb-auth/callback','/api/tmdb-auth/status','/api/tmdb-user/lists','/api/tmdb-user/lists/:id/items']}));
+app.get('/health',(_req,res)=>res.json({ok:true,x_configured:Boolean(process.env.X_BEARER_TOKEN),youtube_configured:Boolean(process.env.YOUTUBE_API_KEY),watchmode_configured:watchmodeConfigured(),tmdb_configured:tmdbConfigured(),tmdb_lists_configured:Boolean(process.env.TMDB_API_READ_ACCESS_TOKEN),x_username:X_USERNAME,authentication:getCredentialStatus(),timestamp:new Date().toISOString()}));
 app.get('/api/x-config',(_req,res)=>res.json({username:X_USERNAME,credentials:getCredentialStatus(),current_read_auth:'bearer_token'}));
 app.get('/api/x-test',async(_req,res)=>{const startedAt=Date.now();if(!process.env.X_BEARER_TOKEN)return res.status(503).json({ok:false,x_reachable:false,authenticated:false,credentials:getCredentialStatus(),message:'X_BEARER_TOKEN is not configured on the server.'});try{const body=await xFetch(`/users/by/username/${encodeURIComponent(X_USERNAME)}?user.fields=id,name,username`);return res.json({ok:true,x_reachable:true,authenticated:true,http_status:200,elapsed_ms:Date.now()-startedAt,x_user:body.data?{id:body.data.id,name:body.data.name,username:body.data.username}:null,credentials:getCredentialStatus(),message:'X API authentication and user lookup are working.'})}catch(error){return res.status(error.status||502).json({ok:false,x_reachable:true,authenticated:false,elapsed_ms:Date.now()-startedAt,credentials:getCredentialStatus(),x_error:error.x||{message:error.message},message:'X responded, but the request was rejected.'})}});
 app.get('/api/x-posts',async(req,res)=>{try{if(cache.data&&cache.expiresAt>Date.now()&&!req.query.refresh)return res.json({...cache.data,cached:true});const data=await fetchRecentPosts(req.query.limit);cache.data=data;cache.expiresAt=Date.now()+CACHE_MS;res.json({...data,cached:false})}catch(error){console.error('X API error:',error.x||error.message);res.status(error.status||500).json({error:'Unable to fetch recent X posts.',message:error.message})}});
@@ -47,4 +48,5 @@ app.get('/api/clubs',async(req,res)=>{try{res.json(await fetchYouTubeVideos(req.
 
 registerWatchmodeRoutes(app);
 registerTmdbRoutes(app);
+registerTmdbListRoutes(app);
 app.listen(PORT,()=>console.log(`Fabrizio Romano backend listening on port ${PORT}`));
