@@ -1,14 +1,13 @@
 const TMDB_V4='https://api.themoviedb.org/4';
-const TMDB_V3='https://api.themoviedb.org/3';
 const FRONTEND_URL=String(process.env.FRONTEND_URL||'https://fabrizo-romano.onrender.com').replace(/\/$/,'');
 const COOKIE_NAME='tmdb_user_access';
 const ACCOUNT_COOKIE='tmdb_account_id';
 const REQUEST_COOKIE='tmdb_request_token';
-
 function parseCookies(req){return String(req.headers.cookie||'').split(';').reduce((out,p)=>{const i=p.indexOf('=');if(i>0)out[p.slice(0,i).trim()]=decodeURIComponent(p.slice(i+1).trim());return out},{});}
 function appToken(){return String(process.env.TMDB_API_READ_ACCESS_TOKEN||'').trim();}
-function setCookie(res,name,value,maxAge){res.setHeader('Set-Cookie',[`${name}=${encodeURIComponent(value)}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=None`]);}
-function clearCookies(res){res.setHeader('Set-Cookie',[`${COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=None`,`${ACCOUNT_COOKIE}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=None`,`${REQUEST_COOKIE}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=None`]);}
+function appendCookie(res,cookie){const current=res.getHeader('Set-Cookie');const values=current?(Array.isArray(current)?current:[current]):[];res.setHeader('Set-Cookie',[...values,cookie]);}
+function setCookie(res,name,value,maxAge){appendCookie(res,`${name}=${encodeURIComponent(value)}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=None`);}
+function clearCookies(res){setCookie(res,COOKIE_NAME,'',0);setCookie(res,ACCOUNT_COOKIE,'',0);setCookie(res,REQUEST_COOKIE,'',0);}
 async function tmdb(path,{method='GET',token=appToken(),body}={}){if(!token){const e=new Error('TMDB_API_READ_ACCESS_TOKEN is not configured on the backend.');e.status=503;throw e}const r=await fetch((path.startsWith('http')?path:TMDB_V4+path),{method,headers:{Authorization:`Bearer ${token}`,Accept:'application/json','Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});const data=await r.json().catch(()=>({}));if(!r.ok){const e=new Error(data?.status_message||data?.message||`TMDB returned ${r.status}`);e.status=r.status;e.tmdb=data;throw e}return data}
 function userToken(req){return parseCookies(req)[COOKIE_NAME]||'';}
 function requireUser(req,res){const token=userToken(req);if(!token){res.status(401).json({error:'TMDB account is not connected.',code:'TMDB_AUTH_REQUIRED'});return null}return token;}
@@ -22,5 +21,5 @@ export function registerTmdbListRoutes(app){
   app.post('/api/tmdb-user/lists',async(req,res)=>{const token=requireUser(req,res);if(!token)return;try{const name=String(req.body?.name||'').trim();if(!name)return res.status(400).json({error:'List name is required.'});const body={name,description:String(req.body?.description||'').trim(),public:Boolean(req.body?.public),iso_3166_1:String(req.body?.iso_3166_1||'US').toUpperCase(),iso_639_1:String(req.body?.iso_639_1||'en').toLowerCase()};res.json(await tmdb('/list',{method:'POST',token,body}))}catch(e){res.status(e.status||500).json({error:'Unable to create TMDB list.',message:e.message})}});
   app.post('/api/tmdb-user/lists/:id/items',async(req,res)=>{const token=requireUser(req,res);if(!token)return;try{const mediaId=Number(req.body?.media_id);const mediaType=String(req.body?.media_type||'movie');if(!Number.isInteger(mediaId)||mediaId<1)return res.status(400).json({error:'A valid media_id is required.'});if(!['movie','tv'].includes(mediaType))return res.status(400).json({error:'media_type must be movie or tv.'});res.json(await tmdb(`/list/${encodeURIComponent(req.params.id)}/items`,{method:'POST',token,body:{items:[{media_type:mediaType,media_id:mediaId}]}}))}catch(e){res.status(e.status||500).json({error:'Unable to add the movie to the list.',message:e.message})}});
   app.delete('/api/tmdb-user/lists/:id/items',async(req,res)=>{const token=requireUser(req,res);if(!token)return;try{const mediaId=Number(req.body?.media_id);const mediaType=String(req.body?.media_type||'movie');res.json(await tmdb(`/list/${encodeURIComponent(req.params.id)}/items`,{method:'DELETE',token,body:{items:[{media_type:mediaType,media_id:mediaId}]}}))}catch(e){res.status(e.status||500).json({error:'Unable to remove the item from the list.',message:e.message})}});
-  app.delete('/api/tmdb-user/lists/:id',async(req,res)=>{const token=requireUser(req,res);if(!token)return;try{res.json(await tmdb(`/list/${encodeURIComponent(req.params.id)}`,{method:'DELETE',token,body:{}}))}catch(e){res.status(e.status||500).json({error:'Unable to delete the list.',message:e.message})}});
+  app.delete('/api/tmdb-user/lists/:id',async(req,res)=>{const token=requireUser(req,res);if(!token)return;try{res.json(await tmdb(`/${encodeURIComponent(req.params.id)}`,{method:'DELETE',token,body:{}}))}catch(e){res.status(e.status||500).json({error:'Unable to delete the list.',message:e.message})}});
 }
