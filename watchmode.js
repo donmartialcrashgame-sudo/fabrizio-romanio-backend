@@ -25,6 +25,7 @@ async function cachedWatchmode(key, loader) {
 }
 
 function safeLimit(value, fallback = 20) { return Math.min(Math.max(Number(value) || fallback, 1), 50); }
+function safeRegion(value) { return String(value || process.env.WATCHMODE_REGION || 'NG').trim().toUpperCase().slice(0, 2) || 'NG'; }
 export function watchmodeConfigured() { return Boolean(process.env.WATCHMODE_API_KEY); }
 export async function watchmodeStatus() { return watchmodeFetch('/status/'); }
 
@@ -35,13 +36,11 @@ export async function watchmodeSearch(query, type = '') {
 }
 
 export async function watchmodeListTitles({ type = 'movie', region = '', sort = 'popularity_desc', page = 1, limit = 20 } = {}) {
-  const safePage = Math.max(Number(page) || 1, 1), safeCount = safeLimit(limit);
-  const key = `titles:${type}:${region}:${sort}:${safePage}:${safeCount}`;
+  const safePage = Math.max(Number(page) || 1, 1), safeCount = safeLimit(limit), safeReg = safeRegion(region);
+  const key = `titles:${type}:${safeReg}:${sort}:${safePage}:${safeCount}`;
   return cachedWatchmode(key, async () => {
-    const payload = await watchmodeFetch('/list-titles/', { types: type, regions: region || undefined, sort_by: sort, page: safePage, limit: safeCount });
+    const payload = await watchmodeFetch('/list-titles/', { types: type, regions: safeReg, sort_by: sort, page: safePage, limit: safeCount });
     const titles = Array.isArray(payload.titles) ? payload.titles : [];
-    // list-titles is intentionally cheap and returns IDs; enrich a small first page with posters/details.
-    // The enriched result is cached for an hour so the free quota is protected from repeated page loads.
     const enriched = await Promise.all(titles.slice(0, Math.min(titles.length, 12)).map(async title => {
       try {
         const detail = await watchmodeFetch(`/title/${encodeURIComponent(title.id)}/details/`);
@@ -61,10 +60,11 @@ export async function watchmodeDetails(id, append = '') {
 export async function watchmodeSources(id, region = '') {
   const titleId = String(id || '').trim();
   if (!titleId) { const error = new Error('A Watchmode title ID is required.'); error.status = 400; throw error; }
-  return cachedWatchmode(`sources:${titleId}:${region}`, async () => watchmodeFetch(`/title/${encodeURIComponent(titleId)}/sources/`, { regions: region || undefined }));
+  const safeReg = safeRegion(region);
+  return cachedWatchmode(`sources:${titleId}:${safeReg}`, async () => watchmodeFetch(`/title/${encodeURIComponent(titleId)}/sources/`, { regions: safeReg }));
 }
 export async function watchmodeGenres() { return cachedWatchmode('genres', async () => ({ genres: await watchmodeFetch('/genres/') })); }
-export async function watchmodeProviders(region = '') { return cachedWatchmode(`providers:${region}`, async () => ({ sources: await watchmodeFetch('/sources/', { regions: region || undefined }) })); }
+export async function watchmodeProviders(region = '') { const safeReg = safeRegion(region); return cachedWatchmode(`providers:${safeReg}`, async () => ({ sources: await watchmodeFetch('/sources/', { regions: safeReg }) })); }
 
 export function registerWatchmodeRoutes(app) {
   app.get('/api/watchmode-test', async (_req, res) => {
@@ -76,14 +76,14 @@ export function registerWatchmodeRoutes(app) {
 
   app.get('/api/movies', async (req, res) => {
     try {
-      const q = String(req.query.q || '').trim(), type = String(req.query.type || 'movie'), region = String(req.query.region || process.env.WATCHMODE_REGION || 'US').toUpperCase(), sort = String(req.query.sort || 'popularity_desc'), limit = safeLimit(req.query.limit, 24), page = Math.max(Number(req.query.page) || 1, 1);
+      const q = String(req.query.q || '').trim(), type = String(req.query.type || 'movie'), region = safeRegion(req.query.region), sort = String(req.query.sort || 'popularity_desc'), limit = safeLimit(req.query.limit, 24), page = Math.max(Number(req.query.page) || 1, 1);
       const data = q ? await watchmodeSearch(q, type === 'movie' ? 'movie' : '') : await watchmodeListTitles({ type, region, sort, page, limit });
       res.json({ ...data, query: q, region, type, source: 'Watchmode' });
     } catch (error) { console.error('Watchmode movies error:', error.watchmode || error.message); res.status(error.status || 500).json({ error: 'Unable to fetch movie data.', message: error.message }); }
   });
 
   app.get('/api/movies/:id', async (req, res) => { try { res.json({ ...(await watchmodeDetails(req.params.id, String(req.query.append || ''))), source: 'Watchmode' }); } catch (error) { console.error('Watchmode title error:', error.watchmode || error.message); res.status(error.status || 500).json({ error: 'Unable to fetch title details.', message: error.message }); } });
-  app.get('/api/movies/:id/sources', async (req, res) => { try { const region = String(req.query.region || process.env.WATCHMODE_REGION || 'US').toUpperCase(); res.json({ sources: await watchmodeSources(req.params.id, region), region, source: 'Watchmode' }); } catch (error) { console.error('Watchmode sources error:', error.watchmode || error.message); res.status(error.status || 500).json({ error: 'Unable to fetch streaming availability.', message: error.message }); } });
+  app.get('/api/movies/:id/sources', async (req, res) => { try { const region = safeRegion(req.query.region); const sources = await watchmodeSources(req.params.id, region); res.json({ sources: Array.isArray(sources) ? sources : (sources?.sources || []), region, source: 'Watchmode' }); } catch (error) { console.error('Watchmode sources error:', error.watchmode || error.message); res.status(error.status || 500).json({ error: 'Unable to fetch streaming availability.', message: error.message }); } });
   app.get('/api/movie-genres', async (_req, res) => { try { res.json({ ...(await watchmodeGenres()), source: 'Watchmode' }); } catch (error) { res.status(error.status || 500).json({ error: 'Unable to fetch movie genres.', message: error.message }); } });
-  app.get('/api/movie-providers', async (req, res) => { try { const region = String(req.query.region || process.env.WATCHMODE_REGION || 'US').toUpperCase(); res.json({ ...(await watchmodeProviders(region)), region, source: 'Watchmode' }); } catch (error) { res.status(error.status || 500).json({ error: 'Unable to fetch streaming providers.', message: error.message }); } });
+  app.get('/api/movie-providers', async (req, res) => { try { const region = safeRegion(req.query.region); res.json({ ...(await watchmodeProviders(region)), region, source: 'Watchmode' }); } catch (error) { res.status(error.status || 500).json({ error: 'Unable to fetch streaming providers.', message: error.message }); } });
 }
