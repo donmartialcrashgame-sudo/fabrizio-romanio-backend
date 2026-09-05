@@ -5,14 +5,17 @@ import 'dotenv/config';
 const app = express();
 const PORT = process.env.PORT || 10000;
 const X_API_BASE = 'https://api.x.com/2';
+const YOUTUBE_API_BASE = 'https://www.googleapis.com/youtube/v3';
 const X_USERNAME = (process.env.X_USERNAME || 'FabrizioRomano').replace(/^@/, '');
 const CACHE_MS = Number(process.env.X_CACHE_MS || 120000);
+const YOUTUBE_CACHE_MS = Number(process.env.YOUTUBE_CACHE_MS || 120000);
 
 app.use(cors());
 app.use(express.json());
 
 let cache = { expiresAt: 0, data: null };
 let userCache = { id: null, username: null, expiresAt: 0 };
+let youtubeCache = new Map();
 
 function getXConfig() {
   return {
@@ -35,13 +38,22 @@ function getCredentialStatus() {
     client_id: Boolean(config.clientId),
     client_secret: Boolean(config.clientSecret),
     access_token: Boolean(config.accessToken),
-    access_token_secret: Boolean(config.accessTokenSecret)
+    access_token_secret: Boolean(config.accessTokenSecret),
+    youtube_api_key: Boolean(process.env.YOUTUBE_API_KEY)
   };
 }
 
 function requireBearer() {
   if (!process.env.X_BEARER_TOKEN) {
     const error = new Error('X_BEARER_TOKEN is not configured on the server.');
+    error.status = 503;
+    throw error;
+  }
+}
+
+function requireYouTubeKey() {
+  if (!process.env.YOUTUBE_API_KEY) {
+    const error = new Error('YOUTUBE_API_KEY is not configured on the server.');
     error.status = 503;
     throw error;
   }
@@ -65,6 +77,28 @@ async function xFetch(path, options = {}) {
     const error = new Error(message);
     error.status = response.status;
     error.x = body;
+    throw error;
+  }
+  return body;
+}
+
+async function youtubeFetch(path, params = {}) {
+  requireYouTubeKey();
+  const url = new URL(`${YOUTUBE_API_BASE}${path}`);
+  Object.entries({ ...params, key: process.env.YOUTUBE_API_KEY }).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, String(value));
+  });
+
+  const response = await fetch(url, {
+    headers: { Accept: 'application/json' }
+  });
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const message = body?.error?.message || `YouTube API returned ${response.status}`;
+    const error = new Error(message);
+    error.status = response.status;
+    error.youtube = body;
     throw error;
   }
   return body;
@@ -139,6 +173,75 @@ async function fetchRecentPosts(limit = 10) {
     source: 'X API v2',
     fetched_at: new Date().toISOString()
   };
+}
+
+function normalizeYouTubeVideos(payload) {
+  return (payload.items || []).map(item => {
+    const videoId = item.id?.videoId || item.id;
+    const snippet = item.snippet || {};
+    const statistics = item.statistics || {};
+    return {
+      id: videoId,
+      title: snippet.title || '',
+      description: snippet.description || '',
+      published_at: snippet.publishedAt || null,
+      channel_id: snippet.channelId || null,
+      channel_title: snippet.channelTitle || '',
+      thumbnails: snippet.thumbnails || {},
+      url: videoId ? `https://www.youtube.com/watch?v=${videoId}` : null,
+      statistics: item.statistics ? {
+        view_count: statistics.viewCount || '0',
+        like_count: statistics.likeCount || '0',
+        comment_count: statistics.commentCount || '0'
+      } : null
+    };
+  });
+}
+
+async function fetchYouTubeVideos(query = 'Fabrizio Romano', limit = 10) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 10, 1), 50);
+  const safeQuery = String(query || 'Fabrizio Romano').trim() || 'Fabrizio Romano';
+  const cacheKey = `${safeQuery.toLowerCase()}::${safeLimit}`;
+  const cached = youtubeCache.get(cacheKey);
+
+  if (cached && cached.expiresAt > Date.now()) {
+    return { ...cached.data, cached: true };
+  }
+
+  const searchPayload = await youtubeFetch('/search', {
+    part: 'snippet',
+    q: safeQuery,
+    type: 'video',
+    order: 'date',
+    maxResults: safeLimit
+  });
+
+  const videoIds = (searchPayload.items || [])
+    .map(item => item.id?.videoId)
+    .filter(Boolean);
+
+  let videos = normalizeYouTubeVideos(searchPayload);
+
+  if (videoIds.length) {
+    const detailsPayload = await youtubeFetch('/videos', {
+      part: 'snippet,statistics',
+      id: videoIds.join(',')
+    });
+
+    const detailsById = new Map(normalizeYouTubeVideos(detailsPayload).map(video => [video.id, video]));
+    videos = videos.map(video => detailsById.get(video.id) || video);
+  }
+
+  const data = {
+    videos,
+    query: safeQuery,
+    count: videos.length,
+    source: 'YouTube Data API v3',
+    fetched_at: new Date().toISOString()
+  };
+
+  youtubeCache.set(cacheKey, { data, expiresAt: Date.now() + YOUTUBE_CACHE_MS });
+  return { ...data, cached: false };
 }
 
 // Diagnostic test: makes one small authenticated request to X and reports
@@ -218,15 +321,70 @@ app.get('/api/x-test', async (_req, res) => {
   }
 });
 
+// Diagnostic test for the YouTube API key. Never returns the key itself.
+app.get('/api/youtube-test', async (_req, res) => {
+  const startedAt = Date.now();
+  const configured = Boolean(process.env.YOUTUBE_API_KEY);
+
+  if (!configured) {
+    return res.status(503).json({
+      ok: false,
+      youtube_reachable: false,
+      authenticated: false,
+      youtube_api_key_configured: false,
+      message: 'YOUTUBE_API_KEY is not configured on the server.',
+      next_step: 'Add YOUTUBE_API_KEY to the Render environment variables and redeploy.'
+    });
+  }
+
+  try {
+    const payload = await youtubeFetch('/videos', {
+      part: 'snippet',
+      chart: 'mostPopular',
+      regionCode: 'US',
+      maxResults: 1
+    });
+
+    return res.json({
+      ok: true,
+      youtube_reachable: true,
+      authenticated: true,
+      http_status: 200,
+      elapsed_ms: Date.now() - startedAt,
+      youtube_api_key_configured: true,
+      sample_items: Array.isArray(payload.items) ? payload.items.length : 0,
+      quota_error: false,
+      message: 'YouTube Data API v3 is reachable and the API key is working.'
+    });
+  } catch (error) {
+    const status = error.status || 500;
+    return res.status(status).json({
+      ok: false,
+      youtube_reachable: status !== 502,
+      authenticated: false,
+      http_status: status,
+      elapsed_ms: Date.now() - startedAt,
+      youtube_api_key_configured: true,
+      youtube_error: {
+        message: error.youtube?.error?.message || error.message,
+        reason: error.youtube?.error?.errors?.[0]?.reason || null,
+        status: error.youtube?.error?.status || null
+      },
+      message: 'YouTube responded, but the API request was rejected.'
+    });
+  }
+});
+
 app.get('/', (_req, res) => {
   res.json({
     name: 'Fabrizio Romano Backend',
     status: 'ok',
     authentication: {
       supported: ['Bearer Token', 'API Key/Secret', 'OAuth 2.0 Client ID/Secret', 'OAuth 1.0a Access Token/Secret'],
-      current_read_method: 'Bearer Token'
+      current_x_read_method: 'Bearer Token',
+      youtube_read_method: 'API Key'
     },
-    endpoints: ['/health', '/api/x-config', '/api/x-test', '/api/x-posts']
+    endpoints: ['/health', '/api/x-config', '/api/x-test', '/api/x-posts', '/api/youtube-test', '/api/youtube-videos']
   });
 });
 
@@ -234,6 +392,7 @@ app.get('/health', (_req, res) => {
   res.json({
     ok: true,
     x_configured: Boolean(process.env.X_BEARER_TOKEN),
+    youtube_configured: Boolean(process.env.YOUTUBE_API_KEY),
     x_username: X_USERNAME,
     authentication: getCredentialStatus(),
     timestamp: new Date().toISOString()
@@ -264,6 +423,22 @@ app.get('/api/x-posts', async (req, res) => {
       error: 'Unable to fetch recent X posts.',
       message: error.message,
       hint: error.status === 401 ? 'Check X_BEARER_TOKEN in Render.' : undefined
+    });
+  }
+});
+
+app.get('/api/youtube-videos', async (req, res) => {
+  try {
+    const data = await fetchYouTubeVideos(req.query.q, req.query.limit);
+    res.json(data);
+  } catch (error) {
+    console.error('YouTube API error:', error.youtube || error.message);
+    res.status(error.status || 500).json({
+      error: 'Unable to fetch YouTube videos.',
+      message: error.message,
+      hint: error.status === 403
+        ? 'Check that YouTube Data API v3 is enabled and that the API key has available quota.'
+        : undefined
     });
   }
 });
