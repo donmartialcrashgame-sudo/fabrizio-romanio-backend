@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import 'dotenv/config';
 import { registerWatchmodeRoutes, watchmodeConfigured } from './watchmode.js';
+import { registerTmdbRoutes, tmdbConfigured } from './tmdb.js';
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -19,116 +20,31 @@ app.use(express.json());
 
 function getCredentialStatus() {
   return {
-    bearer_token: Boolean(process.env.X_BEARER_TOKEN),
-    api_key: Boolean(process.env.X_API_KEY),
-    api_secret: Boolean(process.env.X_API_SECRET),
-    client_id: Boolean(process.env.X_CLIENT_ID),
-    client_secret: Boolean(process.env.X_CLIENT_SECRET),
-    access_token: Boolean(process.env.X_ACCESS_TOKEN),
-    access_token_secret: Boolean(process.env.X_ACCESS_TOKEN_SECRET),
-    youtube_api_key: Boolean(process.env.YOUTUBE_API_KEY),
-    watchmode_api_key: watchmodeConfigured()
+    bearer_token: Boolean(process.env.X_BEARER_TOKEN), api_key: Boolean(process.env.X_API_KEY), api_secret: Boolean(process.env.X_API_SECRET),
+    client_id: Boolean(process.env.X_CLIENT_ID), client_secret: Boolean(process.env.X_CLIENT_SECRET), access_token: Boolean(process.env.X_ACCESS_TOKEN),
+    access_token_secret: Boolean(process.env.X_ACCESS_TOKEN_SECRET), youtube_api_key: Boolean(process.env.YOUTUBE_API_KEY),
+    watchmode_api_key: watchmodeConfigured(), tmdb_api_key: tmdbConfigured()
   };
 }
 
-async function xFetch(path) {
-  if (!process.env.X_BEARER_TOKEN) {
-    const error = new Error('X_BEARER_TOKEN is not configured on the server.');
-    error.status = 503;
-    throw error;
-  }
-  const response = await fetch(`${X_API_BASE}${path}`, { headers: { Authorization: `Bearer ${process.env.X_BEARER_TOKEN}`, Accept: 'application/json' } });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) { const error = new Error(body?.detail || body?.title || `X API returned ${response.status}`); error.status = response.status; error.x = body; throw error; }
-  return body;
-}
+async function xFetch(path) { if (!process.env.X_BEARER_TOKEN) { const e=new Error('X_BEARER_TOKEN is not configured on the server.'); e.status=503; throw e; } const r=await fetch(`${X_API_BASE}${path}`,{headers:{Authorization:`Bearer ${process.env.X_BEARER_TOKEN}`,Accept:'application/json'}}); const b=await r.json().catch(()=>({})); if(!r.ok){const e=new Error(b?.detail||b?.title||`X API returned ${r.status}`);e.status=r.status;e.x=b;throw e} return b }
+async function youtubeFetch(path,params={}) { if(!process.env.YOUTUBE_API_KEY){const e=new Error('YOUTUBE_API_KEY is not configured on the server.');e.status=503;throw e} const url=new URL(`${YOUTUBE_API_BASE}${path}`);Object.entries({...params,key:process.env.YOUTUBE_API_KEY}).forEach(([k,v])=>{if(v!==undefined&&v!==null&&v!=='')url.searchParams.set(k,String(v))});const r=await fetch(url,{headers:{Accept:'application/json'}});const b=await r.json().catch(()=>({}));if(!r.ok){const e=new Error(b?.error?.message||`YouTube API returned ${r.status}`);e.status=r.status;e.youtube=b;throw e}return b }
+async function getUser(){if(userCache.id&&userCache.expiresAt>Date.now())return userCache;const d=await xFetch(`/users/by/username/${encodeURIComponent(X_USERNAME)}?user.fields=id,name,username,profile_image_url,description,verified`);if(!d?.data?.id)throw new Error(`X user @${X_USERNAME} was not found.`);Object.assign(userCache,{id:d.data.id,username:d.data.username,name:d.data.name,profile_image_url:d.data.profile_image_url||null,description:d.data.description||'',verified:Boolean(d.data.verified),expiresAt:Date.now()+900000});return userCache}
+function normalizePosts(payload,user){const mediaByKey=new Map((payload.includes?.media||[]).map(m=>[m.media_key,m]));return(payload.data||[]).map(post=>({id:post.id,text:post.text||'',created_at:post.created_at||null,url:`https://x.com/${user.username}/status/${post.id}`,author:{id:user.id,name:user.name,username:user.username,profile_image_url:user.profile_image_url,verified:user.verified},public_metrics:post.public_metrics||null,media:(post.attachments?.media_keys||[]).map(k=>mediaByKey.get(k)).filter(Boolean).map(m=>({type:m.type,url:m.url||m.preview_image_url||null,preview_image_url:m.preview_image_url||null,width:m.width||null,height:m.height||null}))}))}
+async function fetchRecentPosts(limit=10){const user=await getUser();const safeLimit=Math.min(Math.max(Number(limit)||10,5),100);const params=new URLSearchParams({max_results:String(safeLimit),'tweet.fields':'id,text,created_at,attachments,public_metrics,lang,conversation_id',expansions:'attachments.media_keys,author_id','media.fields':'media_key,type,url,preview_image_url,width,height,duration_ms,alt_text',exclude:'replies,retweets'});const payload=await xFetch(`/users/${user.id}/tweets?${params}`);return{posts:normalizePosts(payload,user),meta:payload.meta||{},source:'X API v2',fetched_at:new Date().toISOString()}}
+function normalizeYouTubeVideos(payload){return(payload.items||[]).map(item=>{const id=item.id?.videoId||item.id,s=item.snippet||{},st=item.statistics||{};return{id,title:s.title||'',description:s.description||'',published_at:s.publishedAt||null,channel_id:s.channelId||null,channel_title:s.channelTitle||'',thumbnails:s.thumbnails||{},url:id?`https://www.youtube.com/watch?v=${id}`:null,statistics:item.statistics?{view_count:st.viewCount||'0',like_count:st.likeCount||'0',comment_count:st.commentCount||'0'}:null}})}
+async function fetchYouTubeVideos(query='Fabrizio Romano',limit=10){const safeLimit=Math.min(Math.max(Number(limit)||10,1),50),safeQuery=String(query||'Fabrizio Romano').trim()||'Fabrizio Romano',key=`${safeQuery.toLowerCase()}::${safeLimit}`,cached=youtubeCache.get(key);if(cached&&cached.expiresAt>Date.now())return{...cached.data,cached:true};const search=await youtubeFetch('/search',{part:'snippet',q:safeQuery,type:'video',order:'date',maxResults:safeLimit});const ids=(search.items||[]).map(i=>i.id?.videoId).filter(Boolean);let videos=normalizeYouTubeVideos(search);if(ids.length){const details=await youtubeFetch('/videos',{part:'snippet,statistics',id:ids.join(',')});const byId=new Map(normalizeYouTubeVideos(details).map(v=>[v.id,v]));videos=videos.map(v=>byId.get(v.id)||v)}const data={videos,query:safeQuery,count:videos.length,source:'YouTube Data API v3',fetched_at:new Date().toISOString()};youtubeCache.set(key,{data,expiresAt:Date.now()+YOUTUBE_CACHE_MS});return{...data,cached:false}}
 
-async function youtubeFetch(path, params = {}) {
-  if (!process.env.YOUTUBE_API_KEY) { const error = new Error('YOUTUBE_API_KEY is not configured on the server.'); error.status = 503; throw error; }
-  const url = new URL(`${YOUTUBE_API_BASE}${path}`);
-  Object.entries({ ...params, key: process.env.YOUTUBE_API_KEY }).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v)); });
-  const response = await fetch(url, { headers: { Accept: 'application/json' } });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) { const error = new Error(body?.error?.message || `YouTube API returned ${response.status}`); error.status = response.status; error.youtube = body; throw error; }
-  return body;
-}
-
-async function getUser() {
-  if (userCache.id && userCache.expiresAt > Date.now()) return userCache;
-  const data = await xFetch(`/users/by/username/${encodeURIComponent(X_USERNAME)}?user.fields=id,name,username,profile_image_url,description,verified`);
-  if (!data?.data?.id) throw new Error(`X user @${X_USERNAME} was not found.`);
-  Object.assign(userCache, { id: data.data.id, username: data.data.username, name: data.data.name, profile_image_url: data.data.profile_image_url || null, description: data.data.description || '', verified: Boolean(data.data.verified), expiresAt: Date.now() + 900000 });
-  return userCache;
-}
-
-function normalizePosts(payload, user) {
-  const mediaByKey = new Map((payload.includes?.media || []).map(m => [m.media_key, m]));
-  return (payload.data || []).map(post => ({
-    id: post.id, text: post.text || '', created_at: post.created_at || null,
-    url: `https://x.com/${user.username}/status/${post.id}`,
-    author: { id: user.id, name: user.name, username: user.username, profile_image_url: user.profile_image_url, verified: user.verified },
-    public_metrics: post.public_metrics || null,
-    media: (post.attachments?.media_keys || []).map(k => mediaByKey.get(k)).filter(Boolean).map(m => ({ type: m.type, url: m.url || m.preview_image_url || null, preview_image_url: m.preview_image_url || null, width: m.width || null, height: m.height || null }))
-  }));
-}
-
-async function fetchRecentPosts(limit = 10) {
-  const user = await getUser();
-  const safeLimit = Math.min(Math.max(Number(limit) || 10, 5), 100);
-  const params = new URLSearchParams({ max_results: String(safeLimit), 'tweet.fields': 'id,text,created_at,attachments,public_metrics,lang,conversation_id', expansions: 'attachments.media_keys,author_id', 'media.fields': 'media_key,type,url,preview_image_url,width,height,duration_ms,alt_text', exclude: 'replies,retweets' });
-  const payload = await xFetch(`/users/${user.id}/tweets?${params}`);
-  return { posts: normalizePosts(payload, user), meta: payload.meta || {}, source: 'X API v2', fetched_at: new Date().toISOString() };
-}
-
-function normalizeYouTubeVideos(payload) {
-  return (payload.items || []).map(item => {
-    const id = item.id?.videoId || item.id;
-    const s = item.snippet || {}, st = item.statistics || {};
-    return { id, title: s.title || '', description: s.description || '', published_at: s.publishedAt || null, channel_id: s.channelId || null, channel_title: s.channelTitle || '', thumbnails: s.thumbnails || {}, url: id ? `https://www.youtube.com/watch?v=${id}` : null, statistics: item.statistics ? { view_count: st.viewCount || '0', like_count: st.likeCount || '0', comment_count: st.commentCount || '0' } : null };
-  });
-}
-
-async function fetchYouTubeVideos(query = 'Fabrizio Romano', limit = 10) {
-  const safeLimit = Math.min(Math.max(Number(limit) || 10, 1), 50);
-  const safeQuery = String(query || 'Fabrizio Romano').trim() || 'Fabrizio Romano';
-  const key = `${safeQuery.toLowerCase()}::${safeLimit}`;
-  const cached = youtubeCache.get(key);
-  if (cached && cached.expiresAt > Date.now()) return { ...cached.data, cached: true };
-  const search = await youtubeFetch('/search', { part: 'snippet', q: safeQuery, type: 'video', order: 'date', maxResults: safeLimit });
-  const ids = (search.items || []).map(i => i.id?.videoId).filter(Boolean);
-  let videos = normalizeYouTubeVideos(search);
-  if (ids.length) {
-    const details = await youtubeFetch('/videos', { part: 'snippet,statistics', id: ids.join(',') });
-    const byId = new Map(normalizeYouTubeVideos(details).map(v => [v.id, v]));
-    videos = videos.map(v => byId.get(v.id) || v);
-  }
-  const data = { videos, query: safeQuery, count: videos.length, source: 'YouTube Data API v3', fetched_at: new Date().toISOString() };
-  youtubeCache.set(key, { data, expiresAt: Date.now() + YOUTUBE_CACHE_MS });
-  return { ...data, cached: false };
-}
-
-app.get('/', (_req, res) => res.json({ name: 'Fabrizio Romano Backend', status: 'ok', authentication: { supported: ['Bearer Token', 'API Key/Secret', 'OAuth 2.0 Client ID/Secret', 'OAuth 1.0a Access Token/Secret'], current_x_read_method: 'Bearer Token', youtube_read_method: 'API Key', watchmode_read_method: 'X-API-Key header' }, endpoints: ['/health', '/api/x-config', '/api/x-test', '/api/x-posts', '/api/youtube-test', '/api/youtube-videos', '/api/watchmode-test', '/api/movies', '/api/movies/:id', '/api/movies/:id/sources', '/api/movie-genres', '/api/movie-providers'] }));
-
-app.get('/health', (_req, res) => res.json({ ok: true, x_configured: Boolean(process.env.X_BEARER_TOKEN), youtube_configured: Boolean(process.env.YOUTUBE_API_KEY), watchmode_configured: watchmodeConfigured(), x_username: X_USERNAME, authentication: getCredentialStatus(), timestamp: new Date().toISOString() }));
-app.get('/api/x-config', (_req, res) => res.json({ username: X_USERNAME, credentials: getCredentialStatus(), current_read_auth: 'bearer_token' }));
-
-app.get('/api/x-test', async (_req, res) => {
-  const startedAt = Date.now();
-  if (!process.env.X_BEARER_TOKEN) return res.status(503).json({ ok: false, x_reachable: false, authenticated: false, credentials: getCredentialStatus(), message: 'X_BEARER_TOKEN is not configured on the server.' });
-  try { const body = await xFetch(`/users/by/username/${encodeURIComponent(X_USERNAME)}?user.fields=id,name,username`); return res.json({ ok: true, x_reachable: true, authenticated: true, http_status: 200, elapsed_ms: Date.now() - startedAt, x_user: body.data ? { id: body.data.id, name: body.data.name, username: body.data.username } : null, credentials: getCredentialStatus(), message: 'X API authentication and user lookup are working.' }); }
-  catch (error) { return res.status(error.status || 502).json({ ok: false, x_reachable: true, authenticated: false, elapsed_ms: Date.now() - startedAt, credentials: getCredentialStatus(), x_error: error.x || { message: error.message }, message: 'X responded, but the request was rejected.' }); }
-});
-
-app.get('/api/x-posts', async (req, res) => { try { if (cache.data && cache.expiresAt > Date.now() && !req.query.refresh) return res.json({ ...cache.data, cached: true }); const data = await fetchRecentPosts(req.query.limit); cache.data = data; cache.expiresAt = Date.now() + CACHE_MS; res.json({ ...data, cached: false }); } catch (error) { console.error('X API error:', error.x || error.message); res.status(error.status || 500).json({ error: 'Unable to fetch recent X posts.', message: error.message }); } });
-
-app.get('/api/youtube-test', async (_req, res) => { const startedAt = Date.now(); try { const p = await youtubeFetch('/videos', { part: 'snippet', chart: 'mostPopular', regionCode: 'US', maxResults: 1 }); res.json({ ok: true, youtube_reachable: true, authenticated: true, http_status: 200, elapsed_ms: Date.now() - startedAt, youtube_api_key_configured: true, sample_items: p.items?.length || 0, message: 'YouTube Data API v3 is working.' }); } catch (error) { res.status(error.status || 500).json({ ok: false, youtube_reachable: Boolean(error.youtube), authenticated: false, http_status: error.status || 500, elapsed_ms: Date.now() - startedAt, youtube_api_key_configured: Boolean(process.env.YOUTUBE_API_KEY), youtube_error: error.youtube || { message: error.message } }); } });
-
-app.get('/api/youtube-videos', async (req, res) => { try { res.json(await fetchYouTubeVideos(req.query.q, req.query.limit)); } catch (error) { console.error('YouTube API error:', error.youtube || error.message); res.status(error.status || 500).json({ error: 'Unable to fetch YouTube videos.', message: error.message }); } });
-
-// Live football directories backed by the same YouTube feed.
-app.get('/api/players', async (req, res) => { try { res.json(await fetchYouTubeVideos(req.query.q || 'football player transfer news', req.query.limit || 24)); } catch (error) { res.status(error.status || 500).json({ error: 'Unable to fetch player reports.', message: error.message }); } });
-app.get('/api/clubs', async (req, res) => { try { res.json(await fetchYouTubeVideos(req.query.q || 'football club transfer news', req.query.limit || 24)); } catch (error) { res.status(error.status || 500).json({ error: 'Unable to fetch club reports.', message: error.message }); } });
+app.get('/',(_req,res)=>res.json({name:'Fabrizio Romano Backend',status:'ok',authentication:{supported:['Bearer Token','API Key/Secret','OAuth 2.0 Client ID/Secret','OAuth 1.0a Access Token/Secret'],current_x_read_method:'Bearer Token',youtube_read_method:'API Key',watchmode_read_method:'X-API-Key header',tmdb_read_method:'Bearer token or API key'},endpoints:['/health','/api/x-config','/api/x-test','/api/x-posts','/api/youtube-test','/api/youtube-videos','/api/watchmode-test','/api/movies','/api/movies/:id','/api/movies/:id/sources','/api/movie-genres','/api/movie-providers','/api/tmdb-test','/api/tmdb-movies','/api/tmdb-movies/:id','/api/tmdb-movies/:id/providers']}));
+app.get('/health',(_req,res)=>res.json({ok:true,x_configured:Boolean(process.env.X_BEARER_TOKEN),youtube_configured:Boolean(process.env.YOUTUBE_API_KEY),watchmode_configured:watchmodeConfigured(),tmdb_configured:tmdbConfigured(),x_username:X_USERNAME,authentication:getCredentialStatus(),timestamp:new Date().toISOString()}));
+app.get('/api/x-config',(_req,res)=>res.json({username:X_USERNAME,credentials:getCredentialStatus(),current_read_auth:'bearer_token'}));
+app.get('/api/x-test',async(_req,res)=>{const startedAt=Date.now();if(!process.env.X_BEARER_TOKEN)return res.status(503).json({ok:false,x_reachable:false,authenticated:false,credentials:getCredentialStatus(),message:'X_BEARER_TOKEN is not configured on the server.'});try{const body=await xFetch(`/users/by/username/${encodeURIComponent(X_USERNAME)}?user.fields=id,name,username`);return res.json({ok:true,x_reachable:true,authenticated:true,http_status:200,elapsed_ms:Date.now()-startedAt,x_user:body.data?{id:body.data.id,name:body.data.name,username:body.data.username}:null,credentials:getCredentialStatus(),message:'X API authentication and user lookup are working.'})}catch(error){return res.status(error.status||502).json({ok:false,x_reachable:true,authenticated:false,elapsed_ms:Date.now()-startedAt,credentials:getCredentialStatus(),x_error:error.x||{message:error.message},message:'X responded, but the request was rejected.'})}});
+app.get('/api/x-posts',async(req,res)=>{try{if(cache.data&&cache.expiresAt>Date.now()&&!req.query.refresh)return res.json({...cache.data,cached:true});const data=await fetchRecentPosts(req.query.limit);cache.data=data;cache.expiresAt=Date.now()+CACHE_MS;res.json({...data,cached:false})}catch(error){console.error('X API error:',error.x||error.message);res.status(error.status||500).json({error:'Unable to fetch recent X posts.',message:error.message})}});
+app.get('/api/youtube-test',async(_req,res)=>{const startedAt=Date.now();try{const p=await youtubeFetch('/videos',{part:'snippet',chart:'mostPopular',regionCode:'US',maxResults:1});res.json({ok:true,youtube_reachable:true,authenticated:true,http_status:200,elapsed_ms:Date.now()-startedAt,youtube_api_key_configured:true,sample_items:p.items?.length||0,message:'YouTube Data API v3 is working.'})}catch(error){res.status(error.status||500).json({ok:false,youtube_reachable:Boolean(error.youtube),authenticated:false,http_status:error.status||500,elapsed_ms:Date.now()-startedAt,youtube_api_key_configured:Boolean(process.env.YOUTUBE_API_KEY),youtube_error:error.youtube||{message:error.message}})}});
+app.get('/api/youtube-videos',async(req,res)=>{try{res.json(await fetchYouTubeVideos(req.query.q,req.query.limit))}catch(error){console.error('YouTube API error:',error.youtube||error.message);res.status(error.status||500).json({error:'Unable to fetch YouTube videos.',message:error.message})}});
+app.get('/api/players',async(req,res)=>{try{res.json(await fetchYouTubeVideos(req.query.q||'football player transfer news',req.query.limit||24))}catch(error){res.status(error.status||500).json({error:'Unable to fetch player reports.',message:error.message})}});
+app.get('/api/clubs',async(req,res)=>{try{res.json(await fetchYouTubeVideos(req.query.q||'football club transfer news',req.query.limit||24))}catch(error){res.status(error.status||500).json({error:'Unable to fetch club reports.',message:error.message})}});
 
 registerWatchmodeRoutes(app);
-
-app.listen(PORT, () => console.log(`Fabrizio Romano backend listening on port ${PORT}`));
+registerTmdbRoutes(app);
+app.listen(PORT,()=>console.log(`Fabrizio Romano backend listening on port ${PORT}`));
