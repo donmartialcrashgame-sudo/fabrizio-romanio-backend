@@ -141,6 +141,83 @@ async function fetchRecentPosts(limit = 10) {
   };
 }
 
+// Diagnostic test: makes one small authenticated request to X and reports
+// the result without ever returning any credential values.
+app.get('/api/x-test', async (_req, res) => {
+  const credentials = getCredentialStatus();
+  const startedAt = Date.now();
+
+  if (!credentials.bearer_token) {
+    return res.status(503).json({
+      ok: false,
+      x_reachable: false,
+      authentication: 'bearer_token',
+      credentials,
+      message: 'X_BEARER_TOKEN is not configured on the server.',
+      next_step: 'Add the X Bearer Token to the Render environment variables.'
+    });
+  }
+
+  try {
+    const response = await fetch(`${X_API_BASE}/users/by/username/${encodeURIComponent(X_USERNAME)}?user.fields=id,name,username`, {
+      headers: {
+        Authorization: `Bearer ${process.env.X_BEARER_TOKEN}`,
+        Accept: 'application/json'
+      }
+    });
+
+    const body = await response.json().catch(() => ({}));
+    const elapsed_ms = Date.now() - startedAt;
+
+    if (response.ok) {
+      return res.json({
+        ok: true,
+        x_reachable: true,
+        authenticated: true,
+        http_status: response.status,
+        elapsed_ms,
+        username_requested: X_USERNAME,
+        x_user: body?.data ? {
+          id: body.data.id,
+          name: body.data.name,
+          username: body.data.username
+        } : null,
+        credentials,
+        message: 'X API authentication and user lookup are working.'
+      });
+    }
+
+    return res.status(response.status).json({
+      ok: false,
+      x_reachable: true,
+      authenticated: false,
+      http_status: response.status,
+      elapsed_ms,
+      username_requested: X_USERNAME,
+      credentials,
+      x_error: {
+        title: body?.title || null,
+        detail: body?.detail || null,
+        type: body?.type || null,
+        errors: Array.isArray(body?.errors)
+          ? body.errors.map(item => ({ title: item?.title || null, detail: item?.detail || null, type: item?.type || null }))
+          : undefined
+      },
+      message: 'X responded, but the current Bearer Token request was rejected.'
+    });
+  } catch (error) {
+    return res.status(502).json({
+      ok: false,
+      x_reachable: false,
+      authenticated: false,
+      elapsed_ms: Date.now() - startedAt,
+      credentials,
+      message: 'The backend could not reach X.',
+      error: error.message
+    });
+  }
+});
+
 app.get('/', (_req, res) => {
   res.json({
     name: 'Fabrizio Romano Backend',
@@ -149,7 +226,7 @@ app.get('/', (_req, res) => {
       supported: ['Bearer Token', 'API Key/Secret', 'OAuth 2.0 Client ID/Secret', 'OAuth 1.0a Access Token/Secret'],
       current_read_method: 'Bearer Token'
     },
-    endpoints: ['/health', '/api/x-config', '/api/x-posts']
+    endpoints: ['/health', '/api/x-config', '/api/x-test', '/api/x-posts']
   });
 });
 
