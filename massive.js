@@ -17,20 +17,15 @@ async function massiveFetch(path, params = {}) {
   });
 
   const response = await fetch(url, {
-    headers: {
-      Accept: 'application/json',
-      Authorization: `Bearer ${process.env.MASSIVE_API_KEY}`
-    }
+    headers: { Accept: 'application/json', Authorization: `Bearer ${process.env.MASSIVE_API_KEY}` }
   });
   const body = await response.json().catch(() => ({}));
-
   if (!response.ok) {
     const error = new Error(body?.message || body?.error || `Massive API returned ${response.status}`);
     error.status = response.status;
     error.massive = body;
     throw error;
   }
-
   return body;
 }
 
@@ -40,19 +35,15 @@ export function registerMassiveRoutes(app) {
       configured: massiveConfigured(),
       provider: 'Massive',
       base_url: MASSIVE_BASE,
-      message: massiveConfigured()
-        ? 'Massive API key is configured on the backend.'
-        : 'Add MASSIVE_API_KEY to the Render environment.'
+      message: massiveConfigured() ? 'Massive API key is configured on the backend.' : 'Add MASSIVE_API_KEY to the Render environment.'
     });
   });
 
   app.get('/api/massive/ticker/:ticker', async (req, res) => {
     try {
       const ticker = String(req.params.ticker || '').trim().toUpperCase();
-      if (!/^[A-Z0-9.:-]{1,20}$/.test(ticker)) {
-        return res.status(400).json({ error: 'Invalid ticker symbol.' });
-      }
-      const data = await massiveFetch(`/v3/reference/tickers/${encodeURIComponent(ticker)}`);
+      if (!/^[A-Z0-9.:-]{1,20}$/.test(ticker)) return res.status(400).json({ error: 'Invalid ticker symbol.' });
+      const data = await massiveFetch(`/v2/snapshot/locale/us/markets/stocks/tickers/${encodeURIComponent(ticker)}`);
       res.json(data);
     } catch (error) {
       console.error('Massive ticker error:', error.massive || error.message);
@@ -63,9 +54,7 @@ export function registerMassiveRoutes(app) {
   app.get('/api/massive/quote/:ticker', async (req, res) => {
     try {
       const ticker = String(req.params.ticker || '').trim().toUpperCase();
-      if (!/^[A-Z0-9.:-]{1,20}$/.test(ticker)) {
-        return res.status(400).json({ error: 'Invalid ticker symbol.' });
-      }
+      if (!/^[A-Z0-9.:-]{1,20}$/.test(ticker)) return res.status(400).json({ error: 'Invalid ticker symbol.' });
       const data = await massiveFetch(`/v2/last/nbbo/${encodeURIComponent(ticker)}`);
       res.json(data);
     } catch (error) {
