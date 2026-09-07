@@ -1,5 +1,6 @@
 const contentStore = new Map();
 const userActions = new Map();
+const commentsStore = new Map();
 
 function safeId(value) {
   const id = String(value || '').trim();
@@ -22,12 +23,17 @@ function getActions(user, id) {
   return userActions.get(key);
 }
 
+function getComments(id) {
+  if (!commentsStore.has(id)) commentsStore.set(id, []);
+  return commentsStore.get(id);
+}
+
 export function registerEngagementRoutes(app) {
   app.get('/api/engagement/:contentId', (req, res) => {
     const id = safeId(req.params.contentId);
     if (!id) return res.status(400).json({ error: 'Invalid content id.' });
     const user = getUser(req);
-    res.json({ content_id: id, ...getContent(id), ...getActions(user, id) });
+    res.json({ content_id: id, ...getContent(id), ...getActions(user, id), comments: getComments(id) });
   });
 
   app.post('/api/engagement/:contentId/:action', (req, res) => {
@@ -51,6 +57,30 @@ export function registerEngagementRoutes(app) {
       content.shares += 1;
     }
 
-    res.json({ content_id: id, ...content, ...actions });
+    res.json({ content_id: id, ...content, ...actions, comments: getComments(id) });
+  });
+
+  app.get('/api/engagement/:contentId/comments', (req, res) => {
+    const id = safeId(req.params.contentId);
+    if (!id) return res.status(400).json({ error: 'Invalid content id.' });
+    res.json({ content_id: id, comments: getComments(id) });
+  });
+
+  app.post('/api/engagement/:contentId/comments', (req, res) => {
+    const id = safeId(req.params.contentId);
+    const text = String(req.body?.text || '').trim();
+    if (!id) return res.status(400).json({ error: 'Invalid content id.' });
+    if (!text || text.length > 1000) return res.status(400).json({ error: 'Comment must contain 1-1000 characters.' });
+
+    const comments = getComments(id);
+    const comment = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      user_id: getUser(req),
+      text,
+      created_at: new Date().toISOString()
+    };
+    comments.push(comment);
+    if (comments.length > 200) comments.splice(0, comments.length - 200);
+    res.status(201).json({ content_id: id, comment, comments });
   });
 }
